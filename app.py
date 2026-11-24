@@ -10,6 +10,36 @@ warnings.filterwarnings("ignore")
 
 MAX_JOBLIB_MB = 25.0
 
+AY_ADLARI = {
+    1: "Ocak",
+    2: "Şubat",
+    3: "Mart",
+    4: "Nisan",
+    5: "Mayıs",
+    6: "Haziran",
+    7: "Temmuz",
+    8: "Ağustos",
+    9: "Eylül",
+    10: "Ekim",
+    11: "Kasım",
+    12: "Aralık",
+}
+
+AY_GUN_SAYILARI = {
+    1: 31,
+    2: 28,
+    3: 31,
+    4: 30,
+    5: 31,
+    6: 30,
+    7: 31,
+    8: 31,
+    9: 30,
+    10: 31,
+    11: 30,
+    12: 31,
+}
+
 RESMI_TATILLER_AY_GUN = {
     (1, 1),   # Yılbaşı
     (4, 23),  # Ulusal Egemenlik ve Çocuk Bayramı
@@ -29,6 +59,7 @@ ZAMAN_BLOKLARI = {
     "tum_gun": (0, 23),
 }
 
+# Fark (d=1) ve daha sade mevsimsel (0, 1, 1, 7) içeren aday seti
 SARIMAX_ADAYLARI = [
     ((0, 1, 1), (0, 1, 1, 7)),
     ((1, 1, 1), (0, 1, 1, 7)),
@@ -37,17 +68,36 @@ SARIMAX_ADAYLARI = [
 ]
 
 ISKELE_TABAN_TALEP = {
-    "bostancı": 16.0,
-    "büyükada": 22.0,
     "kadıköy": 25.0,
-    "karaköy": 20.0,
+    "büyükada": 22.0,
     "beşiktaş": 21.0,
+    "karaköy": 20.0,
     "üsküdar": 19.0,
     "eminönü": 18.0,
     "kabataş": 17.0,
+    "bostancı": 16.0,
+    "heybeliada": 15.0,
+    "sirkeci": 14.5,
+    "burgazada": 13.0,
+    "moda": 12.5,
+    "kınalıada": 11.0,
+    "çengelköy": 10.5,
+    "kuzguncuk": 9.5,
     "bebek": 9.0,
+    "sarıyer": 8.5,
     "arnavutköy": 7.0,
+    "kanlıca": 6.5,
+    "emirgan": 6.0,
+    "beykoz": 5.5,
 }
+
+
+def saat_araligi_etiketi(saat: int, mod: str = "tek_saat") -> str:
+  saat = int(saat)
+  if mod in ZAMAN_BLOKLARI and ZAMAN_BLOKLARI[mod] is not None:
+    bas, bit = ZAMAN_BLOKLARI[mod]
+    return f"{bas:02d}:00 - {bit:02d}:59 ({mod})"
+  return f"{saat:02d}:00 - {saat:02d}:59 (tek_saat)"
 
 
 class DosyasizFinalSARIMAX:
@@ -149,8 +199,8 @@ class DosyasizFinalSARIMAX:
   @staticmethod
   def _hafif_kaydet(paket, kayit_yolu, max_mb=MAX_JOBLIB_MB):
     boyut_mb = 0.0
-    for sıkıştırma in (3, 6, 9):
-      joblib.dump(paket, kayit_yolu, compress=sıkıştırma)
+    for sikistirma in (3, 6, 9):
+      joblib.dump(paket, kayit_yolu, compress=sikistirma)
       boyut_mb = os.path.getsize(kayit_yolu) / (1024 * 1024)
       if boyut_mb <= max_mb:
         return kayit_yolu, round(boyut_mb, 3)
@@ -170,9 +220,9 @@ class DosyasizFinalSARIMAX:
       ozel_gunler=None,
       kayit_yolu="final_sarimax_model.joblib",
   ):
-    iskele_temiz = str(iskele).strip()
-    if not iskele_temiz:
-      raise ValueError("Kalkış iskelesi boş olamaz.")
+    iskele_temiz = str(iskele).strip().lower()
+    if iskele_temiz not in ISKELE_TABAN_TALEP:
+      raise ValueError("Geçersiz kalkış iskelesi seçimi.")
 
     ts = self._seri_uret(iskele=iskele_temiz, saat=saat, mod=mod)
     test_start = pd.to_datetime(test_baslangic).floor("D")
@@ -293,7 +343,7 @@ class DosyasizFinalSARIMAX:
     try:
       hedef_tarih = pd.Timestamp(year=2026, month=ay_int, day=gun_int)
     except ValueError as exc:
-      raise ValueError(f"Geçersiz ay/gün değeri: {ay_int}/{gun_int}") from exc
+      raise ValueError(f"Geçersiz ay/gün değeri: {AY_ADLARI.get(ay_int, ay_int)}/{gun_int}") from exc
 
     ozel_tarihler = [hedef_tarih] if ozel_gun_mu else None
     self.egit_ve_kaydet(
@@ -344,14 +394,14 @@ class DosyasizFinalSARIMAX:
     high = np.round(np.clip(np.asarray(ci.iloc[:, 1].values, dtype=float), 0.0, None)).astype(int)
 
     idx_pos = int(gelecek_idx.get_loc(hedef_tarih)) if hedef_tarih in gelecek_idx else 0
-    saat_etiket = f"{saat_int:02d}:00" if mod == "tek_saat" else f"{mod} ({saat_int:02d}:00)"
+    saat_etiket = saat_araligi_etiketi(saat_int, mod)
 
     hedef_sonuc = {
-        "kalkış_iskelesi": str(iskele).strip(),
+        "kalkış_iskelesi": str(iskele).strip().lower(),
         "tarih": hedef_tarih.strftime("%Y-%m-%d"),
-        "ay": ay_int,
+        "ay": AY_ADLARI.get(ay_int, str(ay_int)),
         "gün": gun_int,
-        "saat": saat_etiket,
+        "saat_araligi": saat_etiket,
         "model": yuklenen["final_model"],
         "kayit_dosyasi": model_dosyasi,
         "dosya_boyutu_mb": yuklenen.get("dosya_boyutu_mb", round(os.path.getsize(model_dosyasi) / (1024 * 1024), 3)),
@@ -363,7 +413,7 @@ class DosyasizFinalSARIMAX:
     pencere_df = pd.DataFrame({
         "tarih": gelecek_idx[:7].strftime("%Y-%m-%d"),
         "gun": gelecek_idx[:7].day_name(),
-        "saat": saat_etiket,
+        "saat_araligi": saat_etiket,
         "tahmin_yolcu": pred[:7],
         "alt_95": low[:7],
         "ust_95": high[:7],
@@ -371,50 +421,94 @@ class DosyasizFinalSARIMAX:
     return hedef_sonuc, yuklenen["karsilastirma_df"], pencere_df
 
 
+@st.cache_data(show_spinner=False)
+def onbellekli_tahmin_et(
+    iskele: str,
+    ay: int,
+    gun: int,
+    saat: int,
+    mod: str,
+    ozel_gun_mu: bool,
+    model_dosyasi: str,
+):
+  modelci = DosyasizFinalSARIMAX()
+  return modelci.tahmin_et(
+      iskele=iskele,
+      ay=ay,
+      gun=gun,
+      saat=saat,
+      mod=mod,
+      ozel_gun_mu=ozel_gun_mu,
+      model_dosyasi=model_dosyasi,
+  )
+
+
 st.set_page_config(page_title="İskele Yolcu Tahmini (SARIMAX)", layout="centered")
 st.title("İskele Yolcu Tahmini (SARIMAX)")
 st.caption(
-    "Dosya yüklemeden kalkış iskelesi, ay, gün ve saat girerek tahmin alın. "
+    "Kalkış iskelesi, ay, gün ve saat aralığı seçerek tahmin alın. "
     f"Model `joblib` ile en fazla {MAX_JOBLIB_MB:.0f} MB sınırında kaydedilir ve tahminler 0 tabanında tutulur."
 )
 
-hazir_iskeleler = sorted(ISKELE_TABAN_TALEP.keys())
+iskele_secenekleri = list(ISKELE_TABAN_TALEP.keys())
+ay_secenekleri = list(AY_ADLARI.keys())
+
+col_a, col_g = st.columns(2)
+with col_a:
+  ay = st.selectbox(
+      "Ay",
+      options=ay_secenekleri,
+      index=11,  # Aralık
+      format_func=lambda m: AY_ADLARI[m],
+  )
+with col_g:
+  max_gun = AY_GUN_SAYILARI.get(int(ay), 31)
+  gun = st.selectbox(
+      "Gün",
+      options=list(range(1, max_gun + 1)),
+      index=min(4, max_gun - 1),
+  )
+
+saat_secenekleri = []
+for blok_adi, aralik in ZAMAN_BLOKLARI.items():
+  if aralik is not None:
+    bas, bit = aralik
+    saat_secenekleri.append((f"{bas:02d}:00 - {bit:02d}:59 ({blok_adi})", blok_adi, bas))
+for h in range(24):
+  saat_secenekleri.append((f"{h:02d}:00 - {h:02d}:59 (tek_saat)", "tek_saat", h))
 
 with st.form("tahmin_formu"):
-  iskele_giris_modu = st.radio(
-      "Kalkış İskelesi Girişi",
-      ["Listeden Seç", "Manuel Yaz"],
-      horizontal=True,
+  iskele = st.selectbox(
+      "Kalkış İskelesi",
+      options=iskele_secenekleri,
+      index=iskele_secenekleri.index("bostancı") if "bostancı" in iskele_secenekleri else 0,
   )
-  if iskele_giris_modu == "Listeden Seç":
-    varsayilan_idx = hazir_iskeleler.index("bostancı") if "bostancı" in hazir_iskeleler else 0
-    iskele = st.selectbox("Kalkış İskelesi", hazir_iskeleler, index=varsayilan_idx)
-  else:
-    iskele = st.text_input("Kalkış İskelesi", value="bostancı")
-
-  col1, col2, col3 = st.columns(3)
-  with col1:
-    ay = st.number_input("Ay (1-12)", min_value=1, max_value=12, value=12, step=1)
-  with col2:
-    gun = st.number_input("Gün (1-31)", min_value=1, max_value=31, value=5, step=1)
-  with col3:
-    saat = st.number_input("Saat (0-23)", min_value=0, max_value=23, value=18, step=1)
-
-  mod = st.selectbox("Saat / Dilim Modu", list(ZAMAN_BLOKLARI.keys()), index=0)
-  ozel_gun_mu = st.checkbox("Bu tarih özel gün / etkinlik / tatil etkisi taşısın mı?", value=False)
-  model_dosyasi = st.text_input("Joblib Kayıt Dosyası", value="final_sarimax_model.joblib")
+  secilen_saat_araligi = st.selectbox(
+      "Saat Aralığı",
+      options=saat_secenekleri,
+      index=1,  # 17:00 - 20:59 (aksam_donus)
+      format_func=lambda item: item[0],
+  )
+  ozel_gun_mu = st.checkbox(
+      "Bu tarih özel gün / etkinlik / tatil etkisi taşısın mı?",
+      value=False,
+  )
+  model_dosyasi = st.text_input(
+      "Joblib Kayıt Dosyası",
+      value="final_sarimax_model.joblib",
+  )
   gonder = st.form_submit_button("Modeli Eğit, Kaydet ve Tahmin Yap", type="primary")
 
 if gonder:
-  modelci = DosyasizFinalSARIMAX()
+  _, mod_secimi, saat_degeri = secilen_saat_araligi
   with st.spinner("SARIMAX adayları sınanıyor, model joblib'e kaydediliyor ve tahmin üretiliyor..."):
     try:
-      hedef_sonuc, karsilastirma_df, pencere_df = modelci.tahmin_et(
+      hedef_sonuc, karsilastirma_df, pencere_df = onbellekli_tahmin_et(
           iskele=iskele,
           ay=int(ay),
           gun=int(gun),
-          saat=int(saat),
-          mod=mod,
+          saat=int(saat_degeri),
+          mod=mod_secimi,
           ozel_gun_mu=ozel_gun_mu,
           model_dosyasi=model_dosyasi.strip() or "final_sarimax_model.joblib",
       )
@@ -426,8 +520,8 @@ if gonder:
   boyut_kb = round(boyut_mb * 1024.0, 1)
 
   st.success(
-      f"**{hedef_sonuc['kalkış_iskelesi']}** | **{hedef_sonuc['tarih']}** | "
-      f"**{hedef_sonuc['saat']}** → Tahmini Yolcu: **{hedef_sonuc['tahmin_yolcu']}** "
+      f"**{hedef_sonuc['kalkış_iskelesi']}** | **{hedef_sonuc['gün']} {hedef_sonuc['ay']} 2026** | "
+      f"**{hedef_sonuc['saat_araligi']}** → Tahmini Yolcu: **{hedef_sonuc['tahmin_yolcu']}** "
       f"(`{hedef_sonuc['kayit_dosyasi']}`, {boyut_mb} MB / {boyut_kb} KB)"
   )
 
@@ -435,6 +529,8 @@ if gonder:
   m1.metric("Tahmin Yolcu", hedef_sonuc["tahmin_yolcu"])
   m2.metric("Alt Sınır (%95)", hedef_sonuc["alt_95"])
   m3.metric("Üst Sınır (%95)", hedef_sonuc["ust_95"])
+
+  st.caption(f"Seçilen Model: {hedef_sonuc['model']}")
 
   st.subheader("SARIMAX Aday Karşılaştırması (Temel Metrik: RMSE)")
   st.dataframe(karsilastirma_df, use_container_width=True, hide_index=True)
