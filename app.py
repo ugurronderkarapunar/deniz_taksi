@@ -1,3 +1,4 @@
+import calendar
 import os
 import warnings
 import joblib
@@ -59,7 +60,6 @@ ZAMAN_BLOKLARI = {
     "tum_gun": (0, 23),
 }
 
-# Fark (d=1) ve daha sade mevsimsel (0, 1, 1, 7) içeren aday seti
 SARIMAX_ADAYLARI = [
     ((0, 1, 1), (0, 1, 1, 7)),
     ((1, 1, 1), (0, 1, 1, 7)),
@@ -92,6 +92,14 @@ ISKELE_TABAN_TALEP = {
 }
 
 
+def ay_icin_gun_sayisi(yil: int, ay: int) -> int:
+  yil_int = int(yil)
+  ay_int = int(ay)
+  if ay_int == 2:
+    return 29 if calendar.isleap(yil_int) else 28
+  return AY_GUN_SAYILARI.get(ay_int, 31)
+
+
 def saat_araligi_etiketi(saat: int, mod: str = "tek_saat") -> str:
   saat = int(saat)
   if mod in ZAMAN_BLOKLARI and ZAMAN_BLOKLARI[mod] is not None:
@@ -101,10 +109,18 @@ def saat_araligi_etiketi(saat: int, mod: str = "tek_saat") -> str:
 
 
 class DosyasizFinalSARIMAX:
-  def __init__(self, baslangic="2024-01-01", bitis="2026-10-25"):
+  def __init__(self, baslangic="2024-01-01", bitis="2026-12-31"):
     self.baslangic = pd.to_datetime(baslangic).floor("D")
     self.bitis = pd.to_datetime(bitis).floor("D")
     self.gunler = pd.date_range(self.baslangic, self.bitis, freq="D")
+
+  def _hedef_ufuk_penceresi(self, hedef_yil: int):
+    yil_int = int(hedef_yil)
+    egitim_sonu = pd.Timestamp(year=max(2025, yil_int - 1), month=12, day=31)
+    test_baslangic = pd.Timestamp(year=yil_int, month=1, day=1)
+    ufuk_bitis = pd.Timestamp(year=yil_int, month=12, day=31)
+    gunler = pd.date_range(self.baslangic, egitim_sonu, freq="D")
+    return gunler, test_baslangic, ufuk_bitis
 
   @staticmethod
   def _saat_carpani(saat, mod="tek_saat"):
@@ -127,18 +143,21 @@ class DosyasizFinalSARIMAX:
       return 0.40
     return 0.85
 
-  def _seri_uret(self, iskele, saat=18, mod="tek_saat"):
+  def _seri_uret(self, iskele, saat=18, mod="tek_saat", gunler=None):
     iskele_norm = str(iskele).strip().lower()
-    baz = ISKELE_TABAN_TALEP.get(iskele_norm, 12.0)
+    if iskele_norm not in ISKELE_TABAN_TALEP:
+      raise ValueError("Geçersiz kalkış iskelesi seçimi.")
+    baz = ISKELE_TABAN_TALEP[iskele_norm]
     saat_katsayi = self._saat_carpani(saat=saat, mod=mod)
 
+    aktif_gunler = pd.DatetimeIndex(gunler) if gunler is not None else self.gunler
     tohum = abs(hash((iskele_norm, int(saat), mod))) % (2**32)
     rng = np.random.default_rng(tohum)
 
-    n = int(self.gunler.shape[0])
-    hafta_sonu_katsayi = np.where(self.gunler.dayofweek.isin([5, 6]), 1.35, 0.90)
+    n = int(aktif_gunler.shape[0])
+    hafta_sonu_katsayi = np.where(aktif_gunler.dayofweek.isin([5, 6]), 1.35, 0.90)
     mevsim_katsayi = 1.0 + 0.30 * np.sin(
-        (2.0 * np.pi / 365.25) * (self.gunler.dayofyear - 80)
+        (2.0 * np.pi / 365.25) * (aktif_gunler.dayofyear - 80)
     )
     gurultu = rng.normal(loc=0.0, scale=max(1.2, baz * 0.22), size=n)
 
@@ -147,7 +166,7 @@ class DosyasizFinalSARIMAX:
         0.0,
         None,
     )
-    return pd.Series(degerler, index=self.gunler, name="yolcu_sayisi").astype(float)
+    return pd.Series(degerler, index=aktif_gunler, name="yolcu_sayisi").astype(float)
 
   @staticmethod
   def _exog_uret(indeks, ozel_gunler=None, anomali_gunler=None, gelecek_bilinmeyen_mod=False):
@@ -213,8 +232,8 @@ class DosyasizFinalSARIMAX:
       self,
       iskele,
       saat=18,
+      yil=2027,
       mod="tek_saat",
-      test_baslangic="2026-01-01",
       test_gun=7,
       tolerans_k=5,
       ozel_gunler=None,
@@ -224,15 +243,18 @@ class DosyasizFinalSARIMAX:
     if iskele_temiz not in ISKELE_TABAN_TALEP:
       raise ValueError("Geçersiz kalkış iskelesi seçimi.")
 
-    ts = self._seri_uret(iskele=iskele_temiz, saat=saat, mod=mod)
-    test_start = pd.to_datetime(test_baslangic).floor("D")
-    test_end = test_start + pd.Timedelta(days=int(test_gun) - 1)
+    yil_int = int(yil)
+    gunler, test_start, ufuk_bitis = self._hedef_ufuk_penceresi(yil_int)
+    ts = self._seri_uret(iskele=iskele_temiz, saat=saat, mod=mod, gunler=gunler)
 
-    train_y = ts[ts.index < test_start]
-    test_y = ts[(ts.index >= test_start) & (ts.index <= test_end)]
+    hedef_yil_gunler = pd.date_range(test_start, ufuk_bitis, freq="D")
+    hedef_yil_seri = self._seri_uret(iskele=iskele_temiz, saat=saat, mod=mod, gunler=hedef_yil_gunler)
+
+    train_y = ts
+    test_y = hedef_yil_seri.iloc[: max(1, int(test_gun))]
 
     if int(train_y.shape[0]) < 30 or int(test_y.shape[0]) == 0:
-      raise ValueError("Eğitim veya test penceresi için yeterli gün bulunamadı.")
+      raise ValueError("Eğitim veya hedef yıl penceresi için yeterli gün bulunamadı.")
 
     pozitif_train = train_y[train_y > 0]
     esik = max(1.0, float(pozitif_train.quantile(0.25)) * 0.5) if int(pozitif_train.shape[0]) > 0 else 1.0
@@ -287,19 +309,9 @@ class DosyasizFinalSARIMAX:
     en_iyi_s_order = karsilastirma_df.loc[0, "_s_order"]
     en_iyi_etiket = karsilastirma_df.loc[0, "SARIMAX_Order"]
 
-    pozitif_full = ts[ts > 0]
-    esik_full = max(1.0, float(pozitif_full.quantile(0.25)) * 0.5) if int(pozitif_full.shape[0]) > 0 else 1.0
-    full_anomali = set(ts[ts < esik_full].index)
-    full_x = self._exog_uret(
-        ts.index,
-        ozel_gunler=ozel_gunler,
-        anomali_gunler=full_anomali,
-        gelecek_bilinmeyen_mod=False,
-    )
-
     final_fit = SARIMAX(
-        ts,
-        exog=full_x,
+        train_y,
+        exog=train_x,
         order=en_iyi_order,
         seasonal_order=en_iyi_s_order,
         enforce_stationarity=False,
@@ -312,11 +324,14 @@ class DosyasizFinalSARIMAX:
         "s_order": en_iyi_s_order,
         "iskele": iskele_temiz,
         "saat": int(saat),
+        "hedef_yil": yil_int,
         "mod": mod,
         "ozel_gunler": [str(pd.to_datetime(g).date()) for g in (ozel_gunler or [])],
         "final_model": f"SARIMAX{en_iyi_etiket}",
-        "son_veri_tarihi": str(ts.index[-1].date()),
-        "exog_kolonlari": list(full_x.columns),
+        "egitim_baslangic": str(train_y.index[0].date()),
+        "egitim_bitis": str(train_y.index[-1].date()),
+        "ufuk_bitis": str(ufuk_bitis.date()),
+        "exog_kolonlari": list(train_x.columns),
         "karsilastirma_df": karsilastirma_df[[
             c for c in ["SARIMAX_Order", "RMSE", "MAE", "Bias", f"±{tolerans_k}_Yolcu_%", "AIC"]
             if c in karsilastirma_df.columns
@@ -332,30 +347,42 @@ class DosyasizFinalSARIMAX:
       ay,
       gun,
       saat,
+      yil=2027,
       mod="tek_saat",
       ozel_gun_mu=False,
       model_dosyasi="final_sarimax_model.joblib",
   ):
+    yil_int = int(yil)
     ay_int = int(ay)
     gun_int = int(gun)
     saat_int = int(saat)
 
     try:
-      hedef_tarih = pd.Timestamp(year=2026, month=ay_int, day=gun_int)
+      hedef_tarih = pd.Timestamp(year=yil_int, month=ay_int, day=gun_int)
     except ValueError as exc:
-      raise ValueError(f"Geçersiz ay/gün değeri: {AY_ADLARI.get(ay_int, ay_int)}/{gun_int}") from exc
+      raise ValueError(
+          f"Geçersiz tarih değeri: {gun_int} {AY_ADLARI.get(ay_int, ay_int)} {yil_int}"
+      ) from exc
 
     ozel_tarihler = [hedef_tarih] if ozel_gun_mu else None
-    self.egit_ve_kaydet(
+    paket, _ = self.egit_ve_kaydet(
         iskele=iskele,
         saat=saat_int,
+        yil=yil_int,
         mod=mod,
         ozel_gunler=ozel_tarihler,
         kayit_yolu=model_dosyasi,
     )
 
     yuklenen = joblib.load(model_dosyasi)
-    ts = self._seri_uret(iskele=yuklenen["iskele"], saat=yuklenen["saat"], mod=yuklenen["mod"])
+    gunler, _, _ = self._hedef_ufuk_penceresi(yuklenen.get("hedef_yil", yil_int))
+    ts = self._seri_uret(
+        iskele=yuklenen["iskele"],
+        saat=yuklenen["saat"],
+        mod=yuklenen["mod"],
+        gunler=gunler,
+    )
+
     pozitif_full = ts[ts > 0]
     esik_full = max(1.0, float(pozitif_full.quantile(0.25)) * 0.5) if int(pozitif_full.shape[0]) > 0 else 1.0
     full_anomali = set(ts[ts < esik_full].index)
@@ -375,9 +402,11 @@ class DosyasizFinalSARIMAX:
         enforce_invertibility=False,
     ).filter(yuklenen["params"])
 
-    son_tarih = pd.to_datetime(yuklenen["son_veri_tarihi"])
-    fark_gun = int((hedef_tarih - son_tarih).days)
-    adim = max(7, fark_gun if fark_gun > 0 else 7)
+    son_tarih = pd.to_datetime(yuklenen["egitim_bitis"])
+    pencere_baslangic = hedef_tarih if hedef_tarih > son_tarih else (son_tarih + pd.Timedelta(days=1))
+    pencere_son = pencere_baslangic + pd.Timedelta(days=6)
+    fark_gun = int((pencere_son - son_tarih).days)
+    adim = max(7, fark_gun)
     gelecek_idx = pd.date_range(son_tarih + pd.Timedelta(days=1), periods=adim, freq="D")
 
     fc_x = self._exog_uret(
@@ -393,30 +422,45 @@ class DosyasizFinalSARIMAX:
     low = np.round(np.clip(np.asarray(ci.iloc[:, 0].values, dtype=float), 0.0, None)).astype(int)
     high = np.round(np.clip(np.asarray(ci.iloc[:, 1].values, dtype=float), 0.0, None)).astype(int)
 
-    idx_pos = int(gelecek_idx.get_loc(hedef_tarih)) if hedef_tarih in gelecek_idx else 0
+    pred_series = pd.Series(pred, index=gelecek_idx)
+    low_series = pd.Series(low, index=gelecek_idx)
+    high_series = pd.Series(high, index=gelecek_idx)
+
+    if hedef_tarih in pred_series.index:
+      hedef_tahmin = int(pred_series.loc[hedef_tarih])
+      hedef_low = int(low_series.loc[hedef_tarih])
+      hedef_high = int(high_series.loc[hedef_tarih])
+    else:
+      hedef_tahmin = int(pred_series.iloc[0])
+      hedef_low = int(low_series.iloc[0])
+      hedef_high = int(high_series.iloc[0])
+
+    pencere_idx = pd.date_range(pencere_baslangic, periods=7, freq="D")
     saat_etiket = saat_araligi_etiketi(saat_int, mod)
 
     hedef_sonuc = {
         "kalkış_iskelesi": str(iskele).strip().lower(),
         "tarih": hedef_tarih.strftime("%Y-%m-%d"),
+        "yıl": yil_int,
         "ay": AY_ADLARI.get(ay_int, str(ay_int)),
         "gün": gun_int,
         "saat_araligi": saat_etiket,
+        "eğitim_penceresi": f"{yuklenen['egitim_baslangic']} .. {yuklenen['egitim_bitis']}",
         "model": yuklenen["final_model"],
         "kayit_dosyasi": model_dosyasi,
-        "dosya_boyutu_mb": yuklenen.get("dosya_boyutu_mb", round(os.path.getsize(model_dosyasi) / (1024 * 1024), 3)),
-        "tahmin_yolcu": int(pred[idx_pos]),
-        "alt_95": int(low[idx_pos]),
-        "ust_95": int(high[idx_pos]),
+        "dosya_boyutu_mb": paket["dosya_boyutu_mb"],
+        "tahmin_yolcu": hedef_tahmin,
+        "alt_95": hedef_low,
+        "ust_95": hedef_high,
     }
 
     pencere_df = pd.DataFrame({
-        "tarih": gelecek_idx[:7].strftime("%Y-%m-%d"),
-        "gun": gelecek_idx[:7].day_name(),
+        "tarih": pencere_idx.strftime("%Y-%m-%d"),
+        "gun": pencere_idx.day_name(),
         "saat_araligi": saat_etiket,
-        "tahmin_yolcu": pred[:7],
-        "alt_95": low[:7],
-        "ust_95": high[:7],
+        "tahmin_yolcu": [int(pred_series.get(d, pred_series.iloc[-1])) for d in pencere_idx],
+        "alt_95": [int(low_series.get(d, low_series.iloc[-1])) for d in pencere_idx],
+        "ust_95": [int(high_series.get(d, high_series.iloc[-1])) for d in pencere_idx],
     })
     return hedef_sonuc, yuklenen["karsilastirma_df"], pencere_df
 
@@ -424,6 +468,7 @@ class DosyasizFinalSARIMAX:
 @st.cache_data(show_spinner=False)
 def onbellekli_tahmin_et(
     iskele: str,
+    yil: int,
     ay: int,
     gun: int,
     saat: int,
@@ -434,6 +479,7 @@ def onbellekli_tahmin_et(
   modelci = DosyasizFinalSARIMAX()
   return modelci.tahmin_et(
       iskele=iskele,
+      yil=yil,
       ay=ay,
       gun=gun,
       saat=saat,
@@ -446,14 +492,21 @@ def onbellekli_tahmin_et(
 st.set_page_config(page_title="İskele Yolcu Tahmini (SARIMAX)", layout="centered")
 st.title("İskele Yolcu Tahmini (SARIMAX)")
 st.caption(
-    "Kalkış iskelesi, ay, gün ve saat aralığı seçerek tahmin alın. "
-    f"Model `joblib` ile en fazla {MAX_JOBLIB_MB:.0f} MB sınırında kaydedilir ve tahminler 0 tabanında tutulur."
+    "Kalkış iskelesi, hedef yıl, ay, gün ve saat aralığı seçerek tahmin alın. "
+    f"Model seçilen hedef yıla göre eğitilir, `joblib` ile en fazla {MAX_JOBLIB_MB:.0f} MB sınırında kaydedilir."
 )
 
 iskele_secenekleri = list(ISKELE_TABAN_TALEP.keys())
+yil_secenekleri = [2026, 2027, 2028, 2029]
 ay_secenekleri = list(AY_ADLARI.keys())
 
-col_a, col_g = st.columns(2)
+col_y, col_a, col_g = st.columns(3)
+with col_y:
+  yil = st.selectbox(
+      "Hedef Yıl",
+      options=yil_secenekleri,
+      index=1,  # Varsayılan 2027
+  )
 with col_a:
   ay = st.selectbox(
       "Ay",
@@ -462,7 +515,7 @@ with col_a:
       format_func=lambda m: AY_ADLARI[m],
   )
 with col_g:
-  max_gun = AY_GUN_SAYILARI.get(int(ay), 31)
+  max_gun = ay_icin_gun_sayisi(int(yil), int(ay))
   gun = st.selectbox(
       "Gün",
       options=list(range(1, max_gun + 1)),
@@ -497,14 +550,15 @@ with st.form("tahmin_formu"):
       "Joblib Kayıt Dosyası",
       value="final_sarimax_model.joblib",
   )
-  gonder = st.form_submit_button("Modeli Eğit, Kaydet ve Tahmin Yap", type="primary")
+  gonder = st.form_submit_button("Hedef Yıla Göre Eğit ve Tahmin Yap", type="primary")
 
 if gonder:
   _, mod_secimi, saat_degeri = secilen_saat_araligi
-  with st.spinner("SARIMAX adayları sınanıyor, model joblib'e kaydediliyor ve tahmin üretiliyor..."):
+  with st.spinner("Hedef yıl için SARIMAX adayları sınanıyor, model kaydediliyor ve tahmin üretiliyor..."):
     try:
       hedef_sonuc, karsilastirma_df, pencere_df = onbellekli_tahmin_et(
           iskele=iskele,
+          yil=int(yil),
           ay=int(ay),
           gun=int(gun),
           saat=int(saat_degeri),
@@ -520,7 +574,7 @@ if gonder:
   boyut_kb = round(boyut_mb * 1024.0, 1)
 
   st.success(
-      f"**{hedef_sonuc['kalkış_iskelesi']}** | **{hedef_sonuc['gün']} {hedef_sonuc['ay']} 2026** | "
+      f"**{hedef_sonuc['kalkış_iskelesi']}** | **{hedef_sonuc['gün']} {hedef_sonuc['ay']} {hedef_sonuc['yıl']}** | "
       f"**{hedef_sonuc['saat_araligi']}** → Tahmini Yolcu: **{hedef_sonuc['tahmin_yolcu']}** "
       f"(`{hedef_sonuc['kayit_dosyasi']}`, {boyut_mb} MB / {boyut_kb} KB)"
   )
@@ -530,7 +584,9 @@ if gonder:
   m2.metric("Alt Sınır (%95)", hedef_sonuc["alt_95"])
   m3.metric("Üst Sınır (%95)", hedef_sonuc["ust_95"])
 
-  st.caption(f"Seçilen Model: {hedef_sonuc['model']}")
+  st.caption(
+      f"Seçilen Model: {hedef_sonuc['model']} | Eğitim Penceresi: {hedef_sonuc['eğitim_penceresi']}"
+  )
 
   st.subheader("SARIMAX Aday Karşılaştırması (Temel Metrik: RMSE)")
   st.dataframe(karsilastirma_df, use_container_width=True, hide_index=True)
