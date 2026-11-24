@@ -68,6 +68,7 @@ SARIMAX_ADAYLARI = [
 ]
 
 ISKELE_TABAN_TALEP = {
+    # Ana ve Adalar / Sahil iskeleleri
     "kadıköy": 25.0,
     "büyükada": 22.0,
     "beşiktaş": 21.0,
@@ -89,6 +90,29 @@ ISKELE_TABAN_TALEP = {
     "kanlıca": 6.5,
     "emirgan": 6.0,
     "beykoz": 5.5,
+    # Boğaz hattı diğer iskeleler
+    "ortaköy": 12.0,
+    "anadolu hisarı": 7.5,
+    "küçüksu": 7.0,
+    "beylerbeyi": 8.0,
+    "aşiyan": 6.5,
+    "istinye": 7.5,
+    "çubuklu": 6.0,
+    "paşabahçe": 6.0,
+    "rumeli kavağı": 5.0,
+    "anadolu kavağı": 5.5,
+    # Haliç hattı iskeleleri
+    "kasımpaşa": 8.5,
+    "hasköy": 6.5,
+    "sütlüce": 6.0,
+    "eyüpsultan": 9.5,
+    "balat": 7.5,
+    "fener": 7.5,
+    "ayvansaray": 6.0,
+    # Anadolu yakası diğer iskeleler
+    "maltepe": 10.0,
+    "pendik": 7.5,
+    "tuzla": 6.5,
 }
 
 
@@ -293,6 +317,7 @@ class DosyasizFinalSARIMAX:
         aday_kayitlari.append({
             "SARIMAX_Order": f"{order}{s_order}",
             **met,
+            "_abs_bias": abs(float(met["Bias"])),
             "AIC": round(float(m.aic), 1),
             "_order": order,
             "_s_order": s_order,
@@ -300,9 +325,10 @@ class DosyasizFinalSARIMAX:
       except Exception:
         continue
 
+    # Seçim kriteri: en düşük mutlak Bias (|Bias|); eşitlikte RMSE ve AIC
     karsilastirma_df = (
         pd.DataFrame(aday_kayitlari)
-        .sort_values(["RMSE", "AIC"], na_position="last")
+        .sort_values(["_abs_bias", "RMSE", "AIC"], na_position="last")
         .reset_index(drop=True)
     )
     en_iyi_order = karsilastirma_df.loc[0, "_order"]
@@ -322,6 +348,7 @@ class DosyasizFinalSARIMAX:
         "params": np.asarray(final_fit.params, dtype=float),
         "order": en_iyi_order,
         "s_order": en_iyi_s_order,
+        "secim_kriteri": "en_dusuk_bias",
         "iskele": iskele_temiz,
         "saat": int(saat),
         "hedef_yil": yil_int,
@@ -447,6 +474,7 @@ class DosyasizFinalSARIMAX:
         "saat_araligi": saat_etiket,
         "eğitim_penceresi": f"{yuklenen['egitim_baslangic']} .. {yuklenen['egitim_bitis']}",
         "model": yuklenen["final_model"],
+        "secim_kriteri": yuklenen.get("secim_kriteri", "en_dusuk_bias"),
         "kayit_dosyasi": model_dosyasi,
         "dosya_boyutu_mb": paket["dosya_boyutu_mb"],
         "tahmin_yolcu": hedef_tahmin,
@@ -493,7 +521,7 @@ st.set_page_config(page_title="İskele Yolcu Tahmini (SARIMAX)", layout="centere
 st.title("İskele Yolcu Tahmini (SARIMAX)")
 st.caption(
     "Kalkış iskelesi, hedef yıl, ay, gün ve saat aralığı seçerek tahmin alın. "
-    f"Model seçilen hedef yıla göre eğitilir, `joblib` ile en fazla {MAX_JOBLIB_MB:.0f} MB sınırında kaydedilir."
+    f"Aday modeller en düşük mutlak Bias kriteriyle seçilir, `joblib` ile en fazla {MAX_JOBLIB_MB:.0f} MB sınırında kaydedilir."
 )
 
 iskele_secenekleri = list(ISKELE_TABAN_TALEP.keys())
@@ -505,13 +533,13 @@ with col_y:
   yil = st.selectbox(
       "Hedef Yıl",
       options=yil_secenekleri,
-      index=1,  # Varsayılan 2027
+      index=1,
   )
 with col_a:
   ay = st.selectbox(
       "Ay",
       options=ay_secenekleri,
-      index=11,  # Aralık
+      index=11,
       format_func=lambda m: AY_ADLARI[m],
   )
 with col_g:
@@ -539,7 +567,7 @@ with st.form("tahmin_formu"):
   secilen_saat_araligi = st.selectbox(
       "Saat Aralığı",
       options=saat_secenekleri,
-      index=1,  # 17:00 - 20:59 (aksam_donus)
+      index=1,
       format_func=lambda item: item[0],
   )
   ozel_gun_mu = st.checkbox(
@@ -550,11 +578,11 @@ with st.form("tahmin_formu"):
       "Joblib Kayıt Dosyası",
       value="final_sarimax_model.joblib",
   )
-  gonder = st.form_submit_button("Hedef Yıla Göre Eğit ve Tahmin Yap", type="primary")
+  gonder = st.form_submit_button("En Düşük Bias ile Eğit ve Tahmin Yap", type="primary")
 
 if gonder:
   _, mod_secimi, saat_degeri = secilen_saat_araligi
-  with st.spinner("Hedef yıl için SARIMAX adayları sınanıyor, model kaydediliyor ve tahmin üretiliyor..."):
+  with st.spinner("En düşük mutlak Bias kriteriyle SARIMAX adayları sınanıyor ve model kaydediliyor..."):
     try:
       hedef_sonuc, karsilastirma_df, pencere_df = onbellekli_tahmin_et(
           iskele=iskele,
@@ -585,10 +613,11 @@ if gonder:
   m3.metric("Üst Sınır (%95)", hedef_sonuc["ust_95"])
 
   st.caption(
-      f"Seçilen Model: {hedef_sonuc['model']} | Eğitim Penceresi: {hedef_sonuc['eğitim_penceresi']}"
+      f"Seçilen Model: {hedef_sonuc['model']} | Kriter: En Düşük |Bias| | "
+      f"Eğitim Penceresi: {hedef_sonuc['eğitim_penceresi']}"
   )
 
-  st.subheader("SARIMAX Aday Karşılaştırması (Temel Metrik: RMSE)")
+  st.subheader("SARIMAX Aday Karşılaştırması (Temel Metrik: En Düşük |Bias|)")
   st.dataframe(karsilastirma_df, use_container_width=True, hide_index=True)
 
   st.subheader("7 Günlük Tahmin Penceresi")
